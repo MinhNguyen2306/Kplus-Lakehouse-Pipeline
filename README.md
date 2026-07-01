@@ -1,12 +1,25 @@
+<div align="center">
+
 # KPLUS Lakehouse — Medallion Data Pipeline
 
-An end-to-end **lakehouse pipeline** that turns ~1.6M raw KPLUS viewing-log records into
-clean, aggregated tables ready for dashboarding — built solo, from infrastructure to visualization.
+An end-to-end **lakehouse pipeline** that turns ~1.6M raw KPLUS viewing-log records into clean, aggregated tables ready for dashboarding — built solo, from infrastructure to visualization.
 
-Data flows through a **medallion architecture** (Bronze → Silver → Gold) using
-**Apache Iceberg** tables on a **Hive Metastore** catalog, with **MinIO** as S3-compatible
-storage, **PySpark** for processing, **MySQL** as the serving layer, and **Grafana** for dashboards —
-all orchestrated with **Docker Compose**.
+Data flows through a **medallion architecture** (Bronze → Silver → Gold) using Apache Iceberg tables on a Hive Metastore catalog.
+
+<br>
+
+![Apache Spark](https://img.shields.io/badge/Apache%20Spark-E25A1C?style=for-the-badge&logo=apachespark&logoColor=white)
+![Apache Iceberg](https://img.shields.io/badge/Apache%20Iceberg-1E90FF?style=for-the-badge&logo=apache&logoColor=white)
+![MinIO](https://img.shields.io/badge/MinIO-C72E49?style=for-the-badge&logo=minio&logoColor=white)
+![Apache Hive](https://img.shields.io/badge/Apache%20Hive-FDEE21?style=for-the-badge&logo=apachehive&logoColor=black)
+![MySQL](https://img.shields.io/badge/MySQL-4479A1?style=for-the-badge&logo=mysql&logoColor=white)
+![Grafana](https://img.shields.io/badge/Grafana-F46800?style=for-the-badge&logo=grafana&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
+
+</div>
+
+---
 
 ---
 
