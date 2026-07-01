@@ -1,0 +1,8 @@
+# Client-side deps (chạy từ host: upload script, helper, v.v.)
+# Spark/Airflow chạy trong container nên KHÔNG cần cài ở đây.
+boto3==1.34.131
+botocore==1.34.131
+
+# Truy cập MySQL serving layer từ host nếu cần
+PyMySQL==1.1.1
+SQLAlchemy==2.0.31

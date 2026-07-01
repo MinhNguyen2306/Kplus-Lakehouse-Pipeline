@@ -1,0 +1,267 @@
+x-spark-common: &spark-common
+  image: spark:3.5.4
+  volumes:
+    - ./spark_jobs:/opt/spark_jobs
+    - ./config:/opt/config
+    - ./jars:/opt/extra-jars
+  networks:
+    - lakehouse
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.3-python3.11
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__FERNET_KEY: "FB0o_zt4e3Ziq3LdUUO7F2Z95cvFFx16hU8jTeR1ASM="
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
+    PYTHONPATH: /opt/airflow/config
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./spark_jobs:/opt/airflow/spark_jobs
+    - ./config:/opt/airflow/config
+    - airflow-logs:/opt/airflow/logs
+  networks:
+    - lakehouse
+  depends_on:
+    postgres-airflow:
+      condition: service_healthy
+
+services:
+  # ---------------------------------------------------------------------------
+  # STORAGE: MinIO (S3-compatible object store)
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    container_name: minio-lakehouse
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse
+
+  # Auto-create the buckets we need on first boot, then exit.
+  minio-init:
+    image: minio/mc:RELEASE.2024-06-12T14-34-03Z
+    container_name: minio-init-lakehouse
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb -p local/lakehouse;
+      mc mb -p local/warehouse;
+      mc mb -p local/raw;
+      echo 'Buckets ready.';
+      exit 0;
+      "
+    networks:
+      - lakehouse
+
+  # ---------------------------------------------------------------------------
+  # CATALOG: Postgres (backing DB for Hive Metastore)
+  # ---------------------------------------------------------------------------
+  postgres-hive:
+    image: postgres:15
+    container_name: postgres-hive
+    environment:
+      - POSTGRES_USER=hive
+      - POSTGRES_PASSWORD=hive
+      - POSTGRES_DB=metastore
+    volumes:
+      - postgres-hive-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse
+
+  # ---------------------------------------------------------------------------
+  # CATALOG: Hive Metastore (Thrift service on 9083)
+  # Uses the apache/hive standalone metastore image.
+  # ---------------------------------------------------------------------------
+  hive-metastore:
+    image: apache/hive:4.0.0
+    container_name: hive-metastore
+    depends_on:
+      postgres-hive:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      - SERVICE_NAME=metastore
+      - DB_DRIVER=postgres
+      - SERVICE_OPTS=-Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres-hive:5432/metastore
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive
+    ports:
+      - "9083:9083"
+    volumes:
+      - ./hive-conf/metastore-site.xml:/opt/hive/conf/metastore-site.xml
+      - ./jars/postgresql-42.7.3.jar:/opt/hive/lib/postgresql-42.7.3.jar
+      - ./jars/hadoop-aws-3.3.4.jar:/opt/hive/lib/hadoop-aws-3.3.4.jar
+      - ./jars/aws-java-sdk-bundle-1.12.262.jar:/opt/hive/lib/aws-java-sdk-bundle-1.12.262.jar
+    networks:
+      - lakehouse
+
+  # ---------------------------------------------------------------------------
+  # PROCESSING: Spark master + worker (official apache/spark image)
+  # ---------------------------------------------------------------------------
+  spark-master:
+    image: spark:3.5.4
+    container_name: spark-master
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+      --host spark-master --port 7077 --webui-port 8080
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+    ports:
+      - "8080:8080"   # Spark master UI
+      - "7077:7077"   # Spark master RPC
+    volumes:
+      - ./spark_jobs:/opt/spark_jobs
+      - ./config:/opt/config
+      - ./jars:/opt/extra-jars
+    networks:
+      - lakehouse
+
+  spark-worker:
+    <<: *spark-common
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_WORKER_MEMORY=4G
+      - SPARK_WORKER_CORES=2
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077 --webui-port 8081
+
+  # ---------------------------------------------------------------------------
+  # ORCHESTRATION: Airflow (Postgres backend + init + webserver + scheduler)
+  # ---------------------------------------------------------------------------
+  postgres-airflow:
+    image: postgres:15
+    container_name: postgres-airflow
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    volumes:
+      - postgres-airflow-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init-lakehouse
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate && \
+        airflow users create \
+          --username admin \
+          --password admin \
+          --firstname admin \
+          --lastname admin \
+          --role Admin \
+          --email admin@example.com
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver-lakehouse
+    command: webserver
+    ports:
+      - "8082:8080"   # Airflow UI (8080=Spark master, 8081=Spark worker)
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler-lakehouse
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # SERVING: MySQL (gold/serving layer for dashboards)
+  # ---------------------------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=serving
+      - MYSQL_USER=kplus
+      - MYSQL_PASSWORD=kplus
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse
+
+  # ---------------------------------------------------------------------------
+  # DASHBOARD: Grafana
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - lakehouse
+
+networks:
+  lakehouse:
+    driver: bridge
+
+volumes:
+  minio-data:
+  postgres-hive-data:
+  postgres-airflow-data:
+  mysql-data:
+  airflow-logs:
+  grafana-data:
