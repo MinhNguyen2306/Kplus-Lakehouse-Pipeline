@@ -27,84 +27,60 @@ all orchestrated with **Docker Compose**.
 ## Architecture
 <img width="1326" height="663" alt="image" src="https://github.com/user-attachments/assets/3fe6875a-db08-4db4-a28e-61a079f1c7bf" />
 
-```
-
-Key point: **Hive Metastore is not in the data path** — it is the *catalog* that tracks
-where each Iceberg table lives and its schema. Table data itself sits on MinIO.
+Key point: **Hive Metastore is not in the data path** — it is the *catalog* that tracks where each Iceberg table lives and its schema. The table data itself sits on MinIO.
 
 ---
 
 ## Medallion layers
 
-**Bronze — raw capture (`bronze_ingest.py`)**
-Reads N rows from a source JSON file on MinIO (incrementally, via CDC checkpoint),
-extracts the `_source.*` fields, adds `execution_date` / `source_file`, and appends to
-the Iceberg table `kplus.bronze.events`. Supports schema evolution (auto `ALTER TABLE ADD COLUMN`).
+**Bronze — raw capture (`spark_jobs/bronze_ingest.py`)**
+Reads N rows from a source JSON file on MinIO (incrementally, via CDC checkpoint), extracts the `_source.*` fields, adds `execution_date` / `source_file`, and appends to the Iceberg table `kplus.bronze.events`. Supports schema evolution (auto `ALTER TABLE ADD COLUMN`).
 
-**Silver — clean & standardize (`silver_ingest.py`)**
-Reads bronze, then:
-- maps `AppName` → 5 content types (Truyền Hình, Phim Truyện, Giải Trí, Thiếu Nhi, Thể Thao)
-- counts devices per contract
-- groupBy contract + pivot type → sum of `TotalDuration`
-- joins statistics with device counts
+**Silver — clean & standardize (`spark_jobs/silver_ingest.py`)**
+Reads bronze, then maps `AppName` to 5 content types (Truyền Hình, Phim Truyện, Giải Trí, Thiếu Nhi, Thể Thao), counts devices per contract, does groupBy contract + pivot type to sum `TotalDuration`, and joins statistics with device counts. Writes to `kplus.silver.events`.
 
-Writes to `kplus.silver.events`.
+**Gold — enrich & aggregate (`spark_jobs/gold_ingest.py`)**
+Reads silver and computes per-contract behavior features: `MostWatch` (most-watched content type), `Taste` (combination of content types consumed), and `Active` (High/Low segment based on distinct active days). Writes to `kplus.gold.app_usage`.
 
-**Gold — enrich & aggregate (`gold_ingest.py`)**
-Reads silver, computes per-contract behavior features:
-- `MostWatch` — the most-watched content type
-- `Taste` — combination of content types consumed
-- `Active` — activity segment (High/Low) based on distinct active days
-
-Writes to `kplus.gold.app_usage`.
-
-**Serving export (`export_data.py`)**
-Exports the latest gold snapshot into MySQL table `summary_behavior_data` via a
-JDBC temp-table + `INSERT … ON DUPLICATE KEY UPDATE` upsert, so re-runs are idempotent.
+**Serving export (`spark_jobs/export_data.py`)**
+Exports the latest gold snapshot into the MySQL table `summary_behavior_data` via a JDBC temp-table + `INSERT … ON DUPLICATE KEY UPDATE` upsert, so re-runs are idempotent.
 
 ---
 
 ## Incremental loading (CDC checkpoint)
 
-Bronze processes the source file in batches rather than all at once. The
-`cdc_checkpoint` table in MySQL stores the last processed **offset** per file:
+Bronze processes the source file in batches rather than all at once. The `cdc_checkpoint` table in MySQL stores the last processed **offset** per file. Each run reads the checkpoint, ingests the next `rows_per_run` rows, then advances the offset — making ingestion resumable and avoiding reprocessing.
 
-| file_name | last_offset | rows_per_run | execution_date |
-|---|---|---|---|
-| 20220401.json | 70 | 10 | 2026-06-25 |
-
-Each run reads the checkpoint, ingests the next `rows_per_run` rows, then advances the offset.
-This makes ingestion resumable and avoids reprocessing.
-
-> **Note:** the checkpoint and the ingested data must stay in sync. Truncating the checkpoint
-> without clearing the corresponding data can cause duplicate rows in bronze.
+> **Note:** the checkpoint and the ingested data must stay in sync. Truncating the checkpoint without clearing the corresponding data can cause duplicate rows in bronze.
 
 ---
 
 ## Data quality note
 
-The source contains a null-bucket row with `Contract = '0'` holding anomalously large values
-(e.g. ~44.7M duration, 1011 devices). This is filtered out in the serving views before
-aggregation, otherwise it dominates every chart.
+The source contains a null-bucket row with `Contract = '0'` holding anomalously large values (e.g. ~44.7M duration, 1011 devices). This is filtered out in the serving views before aggregation, otherwise it dominates every chart.
 
 ---
 
 ## Project structure
 
 ```
-kplus_lakehouse/
-├── docker-compose.yml          # 9 services: MinIO, Hive, 2×Postgres, Spark, MySQL, Grafana …
+Kplus-Lakehouse-Pipeline/
 ├── config/
-│   └── config.py               # connection strings (host/container aware via KPLUS_RUNTIME)
+│   ├── config.py            # connection strings (host/container aware via KPLUS_RUNTIME)
+│   └── jars_config.py       # Spark JAR / package configuration
 ├── hive-conf/
-│   └── metastore-site.xml       # Hive Metastore + S3A→MinIO config
-├── jars/                       # hadoop-aws, aws-java-sdk-bundle, postgresql, iceberg runtime
+│   └── metastore-site.xml   # Hive Metastore + S3A→MinIO config
 ├── spark_jobs/
-│   ├── bronze_ingest.py
-│   ├── silver_ingest.py
-│   ├── gold_ingest.py
-│   └── export_data.py
-└── README.md
+│   ├── bronze_ingest.py     # raw JSON → Iceberg bronze (CDC incremental)
+│   ├── silver_ingest.py     # clean + standardize → Iceberg silver
+│   ├── gold_ingest.py       # enrich + aggregate → Iceberg gold
+│   └── export_data.py       # gold → MySQL serving (upsert)
+├── docker-compose.yml       # MinIO, Hive, Postgres, Spark, MySQL, Grafana
+├── run_pipeline.py          # runs the stages sequentially
+├── upload_to_minio.py       # upload source file to MinIO raw bucket
+├── requirements.txt
+├── README.md
+└── LICENSE
 ```
 
 ---
