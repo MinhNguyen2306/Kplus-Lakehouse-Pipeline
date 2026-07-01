@@ -25,28 +25,8 @@ all orchestrated with **Docker Compose**.
 ---
 
 ## Architecture
+<img width="1326" height="663" alt="image" src="https://github.com/user-attachments/assets/3fe6875a-db08-4db4-a28e-61a079f1c7bf" />
 
-```
-                        ┌──────────────────────────────────────────────┐
-                        │              PySpark (spark_jobs)              │
-                        │   bronze_ingest → silver_ingest → gold_ingest  │
-                        └──────────────────────────────────────────────┘
-                                 │ writeTo (Iceberg)   │ register metadata
-                                 ▼                     ▼
-   raw/kplus/*.json  ──►  ┌─────────────────────┐   ┌────────────────────┐
-   (source, MinIO)        │  MinIO (s3a://…)     │   │  Hive Metastore    │
-                          │  Iceberg tables:     │   │  catalog = kplus   │
-                          │   kplus.bronze.events│   │  (Postgres backend)│
-                          │   kplus.silver.events│   └────────────────────┘
-                          │   kplus.gold.app_usage│
-                          └─────────────────────┘
-                                 │ export (JDBC upsert)
-                                 ▼
-                          ┌─────────────────────┐        ┌──────────────┐
-                          │  MySQL (serving)     │──────► │   Grafana    │
-                          │  summary_behavior_data│ views │  dashboard   │
-                          │  cdc_checkpoint      │        └──────────────┘
-                          └─────────────────────┘
 ```
 
 Key point: **Hive Metastore is not in the data path** — it is the *catalog* that tracks
