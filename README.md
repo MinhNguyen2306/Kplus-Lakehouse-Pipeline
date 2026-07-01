@@ -21,8 +21,6 @@ Data flows through a **medallion architecture** (Bronze → Silver → Gold) usi
 
 ---
 
----
-
 ## Stack
 
 | Layer | Technology |
